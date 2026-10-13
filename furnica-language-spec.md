@@ -1,6 +1,6 @@
 # Furnica (the Ant executor): language and runtime specification
 
-Version 1.0 · 2026-10-13 · reverse-engineered from the original Windows program
+Version 1.1 · 2026-10-13 · reverse-engineered from the original Windows program; revalidated from scratch against the binary (fresh Ghidra decompilation and RTL disassembly)
 
 This document describes the programming language of **Furnica** ("Executantul ANT", window caption `Executantul "ANT"`, About box `Ant v2.00`). It was written so that the language can be reimplemented, for example as a web app, and so that every claim can be checked again against the original binary.
 
@@ -14,10 +14,12 @@ School textbooks describe this language together with other teaching executors a
 
 | Artifact | Identity |
 |---|---|
-| `Furnica.exe` | 557,568 bytes, SHA-256 `cdf5378c1fb1ce45d641a8cdae5ac19b3371a7389ee76c6135e67b2e0fe2e6b2`, file date 2000-01-19 |
+| `Furnica.exe` | 557,568 bytes, SHA-256 `cdf5378c1fb1ce45d641a8cdae5ac19b3371a7389ee76c6135e67b2e0fe2e6b2`, file date 2000-01-19 (from the distribution archive; the PE `TimeDateStamp` is the fixed Delphi value 708992537 and the About box says 06.12.1999) |
 | Format | PE32, Intel 80386, Windows GUI, Borland Delphi (VCL), image base `0x400000`, `CODE` section at VA `0x401000` |
 
 Everything here comes from that binary: Ghidra 12.1.4 decompilation, raw disassembly, the Delphi form resources (DFM, binary `TPF0` format) and the RTTI method tables. The program was never executed, so all runtime behaviour is derived from static analysis.
+
+The binary is compiled with range checking (`{$R+}`) and overflow checking (`{$Q+}`): array indexes and integer additions in the application code are guarded by calls to the RTL error routines 0x402c78 (runtime error 4) and 0x402c80 (runtime error 5). [O]
 
 A secondary source, used only to form hypotheses, is the Moldovan Grade 8 Informatics textbook (2020, Romanian edition), chapter 2. It is simplified and often wrong about this program. Section 12 lists where it differs.
 
@@ -78,11 +80,14 @@ The original `.lng` file is plain single-byte text, read with Pascal `Readln`: o
 | 20–31 | C[1..12] | 0x45d910 + 4·(i−1) | messages |
 | 32–61 | D[1..30] | 0x45d940 + 4·(i−1) | UI captions |
 
-The language is selected by `language.cfg`. Its first line is `ROM`, `RUS` or `ENG`, which maps to `romana.lng`, `rusa.lng` or `engleza.lng`. [O] `SetLanguage` @0x4583b4, str 0x458548–0x458594.
+The language is selected by `language.cfg`. Its first line is `ROM`, `RUS` or `ENG` (exact, case-sensitive comparison), which maps to `romana.lng`, `rusa.lng` or `engleza.lng`. [O] `SetLanguage` @0x4583b4, str 0x458548–0x458594. Any other first line loads nothing and shows no message. [O] `ReadLanguage` rewrites `language.cfg` with the current code every time it runs, so the choice persists. [O] 0x457d9d–0x457e43.
 
-If `language.cfg` or the chosen `.lng` file is missing, the original shows an empty message box and closes. [O] So the shipped zip on its own cannot run.
+If `language.cfg` or the chosen `.lng` file is missing, the original calls `ShowMessage('')` and then `MainForm.Close` [O] (0x4584f5, 0x4582f2). At startup this happens inside `FormCreate`, before `Application.CreateForm` has registered the main form (0x4436e8), so `Close` does not terminate the program: it runs `FormCloseQuery`, which asks the exit question C12 with an empty text, and on Yes only hides the form. [O] The window then most likely opens anyway with the design-time captions and every keyword slot empty, so nothing parses. [I] Either way, the shipped zip on its own is not usable.
 
-Switching language from the menu reloads the file, **clears the program and the grid**, and puts the ant back at (1,1). [O] 0x45b400 / 0x45b4f4 / 0x45b5e8.
+Switching language from the menu [O] 0x45b400 / 0x45b4f4 / 0x45b5e8:
+- clears all 100 grid cells, sets cell(1,1) := `'*'`, and calls `FormCreate` again; that re-runs `SetLanguage` (so the file is read twice), clears the program, deletes `!temp.tmp` and puts the ant at (1,1) facing down;
+- checks and disables the chosen menu item;
+- if the new `.lng` is missing, the exit question C12 is asked and Yes closes the program.
 
 **[P]** A reimplementation should keep the *role* model and supply its own keyword sets. It does not need to copy the 61-line file layout.
 
@@ -114,7 +119,8 @@ The role of each slot is **[O]**, taken from how the code uses the global. The R
 
 Constraints between roles [O]/[I]:
 - `END_REPEAT` must equal `END` + one space + `REPEAT`. The balance check (0x459868) recognises an end-repeat line as first word `END` followed by `REPEAT`, while the runtime stops a REPEAT body at the line equal to `END_REPEAT`. Both must agree for REPEAT to work.
-- `END_WHILE` must equal `END` + one space + `WHILE`, because the WHILE executor tests for that two-word form.
+- `END_WHILE` must equal `END` + one space + `WHILE`. Inside the body, the WHILE executor recognises the end line as first word `END` with the rest of the line equal to `WHILE` (0x456626–0x45664f); only the final scan that sets PC compares whole lines with `END_WHILE` (0x4567b0).
+- The syntax checker never reads `END_WHILE`, `END_REPEAT` or `END_PROC` except as whole lines that are valid on their own; their only run-time uses are 0x4567b0, 0x4563dc and 0x456a2d.
 - Conditions are single words (no space), because they are read with the next-word function (§3.2).
 - The original compares keywords exactly as stored, without upper-casing them (§3.1), so every keyword must be written in **upper-case ASCII**.
 
@@ -125,7 +131,7 @@ Constraints between roles [O]/[I]:
 At startup, `ReadLanguage` overwrites the captions of 17 keyword-insert buttons (SpeedButton1–19) with the values from the `.lng` file. Their **design-time** captions, stored in the DFM resource `TMAINFORM`, are therefore the Romanian defaults [O]:
 `Inceput`, `Sfirsit`, `Stinga`, `Dreapta`, `Sus`, `Jos`, `Cit`, `Daca`, `E_margine`, `Nu_e_margine`, `Executa`, `Atunci`, `Altfel`, `Repeta`, `Ori`, `Procedura`, plus `Sfirsit...`.
 
-The built-in Romanian help text (DFM `TCONTENTSFORM.Memo1`; it is not localised) uses exactly the upper-case forms in §2.2. Verbatim, in the original spelling (no diacritics; `SFIRSIT` and `STINGA` with *i*):
+The built-in Romanian help text (DFM `TCONTENTSFORM.Memo1`; the text is not localised, only the help window caption D23 and its Exit button D24 are) uses exactly the upper-case forms in §2.2. Verbatim, in the original spelling (no diacritics; `SFIRSIT` and `STINGA` with *i*). In the DFM, the lines `SFIRSIT REPETA`, `...set de`, `<intructiune> in`, `plasate`, `intotdeauna`, `pot intra`, `procedurii se` and `excluzind` end in one trailing space, not shown below:
 
 ```
 Comenzile simple:
@@ -205,7 +211,7 @@ The program text is the list of editor lines, separated by CRLF. Before analysis
 1. Every byte is upper-cased with `System.UpCase`, which converts only ASCII `a`–`z` (0x4027f4: `cmp al,'a'; jb; cmp al,'z'; ja; sub al,20h`).
 2. Leading spaces (0x20) are removed.
 3. Each run of spaces is collapsed to one space.
-4. One trailing space is removed.
+4. If the last character is a space, it is removed. Because runs were already collapsed, this removes all trailing spaces.
 
 Keywords from the localisation file are compared **as stored** with an exact byte comparison (`LStrCmp` 0x403c64).
 
@@ -216,7 +222,7 @@ Consequences:
 
 ### 3.2 Words [O] `NextWord` @0x454508
 
-`NextWord(line)` returns the characters up to the first space (or the end of the line), removes them from the line, and then removes one more character (the space). Called repeatedly, it yields successive words.
+`NextWord(line)` returns the characters up to the first space (or the end of the line), removes them from the line, and then removes one more character (the space). Called repeatedly, it yields successive words. If the line has no space, it returns the whole line and leaves it empty; on an empty line it returns `''`.
 
 ### 3.3 Tokens and other lexical facts
 
@@ -225,9 +231,9 @@ Consequences:
 | Statement separator | The line break. Exactly one statement per line. | [O] 0x459b1c |
 | Blank lines | A line that is empty after normalisation is allowed anywhere. | [O] 0x459c24 |
 | Comments | **None.** Every non-blank line must be a valid statement or marker. | [O] 0x459b1c |
-| Integer (REPEAT count) | Checked with Delphi `Val` (0x4029e0): the parse code must be 0 and the value ≥ 0. At run time it is read with `StrToInt` (0x407c18). `Val` also accepts a leading `+` and `$hex`. | [O]/[I] |
+| Integer (REPEAT count) | Checked with Delphi `Val` (0x4029e0): the parse code must be 0 and the value ≥ 0 (0x459534–0x459544). At run time it is read with `StrToInt` (0x407c18). `Val` also accepts a leading `+`, `-0`, and hexadecimal with `$`, `X` or `0X` (so `x1f` and `0x1f` work after upper-casing). Hex values are not sign-checked: `$80000000` and above become negative and are rejected. `-$5` and an empty count are rejected. | [O] |
 | Procedure name | Any run of non-space characters. Nothing checks for letters or digits, so diacritics, `_` and punctuation are all accepted, compared after ASCII upper-casing. The help text *recommends* letters and digits only. | [O] 0x45997c, 0x459a68 |
-| Reserved words | None formally. Keywords take priority only because they are tested first, so a procedure *can* be named like a keyword and will be shadowed. | [O]/[I] |
+| Reserved words | None. In the checker a keyword line is already valid before procedure names are looked at. At run time a procedure named like a keyword is **not** shadowed: the main loop, procedure bodies and IF branches always look up the procedure table after the keyword dispatch, so a procedure named `SUS` runs *in addition to* the move. | [O] 0x45a06a–0x45a0bd, 0x4569d7–0x456a1a, 0x455ff2–0x45609f |
 
 **[P]** A reimplementation may accept tabs and other Unicode whitespace, add `//` comments as an extension, and restrict names to `letter (letter | digit | _)*`. Mark these as extensions.
 
@@ -278,29 +284,37 @@ The original checks each line separately (§4.3), so this grammar is the **inten
 
 ### 4.3 How the original checks syntax [O] `SyntaxCheck` @0x459b1c (disassembly 0x459bb2–0x459e36)
 
-The check runs line by line, from line 0, and **stops at the first invalid line**:
+The check runs line by line, from line 0 up to and including line index `Count` (one past the last line, which reads as empty and is valid), and **stops at the first invalid line** (loop test 0x459cda–0x459ce6):
 1. `L = Normalize(line i)`.
-2. If `L == BEGIN`, record `beginLine = i` and increment `nBegin`. If `L == END`, record `endLine = i` and increment `nEnd`.
+2. If `L == BEGIN`, record `beginLine = i` and increment `nBegin`. If `L == END`, record `endLine = i` and increment `nEnd`. Both keep the *last* occurrence.
 3. The line is valid if `L` is empty or equals any of the A-slot keywords (A1–A11) as a whole line.
-4. Otherwise `w = NextWord(L)`:
+4. Otherwise `w = NextWord(L)`, followed by four **independent** tests on `w` (0x459c4e–0x459ca9), in this order:
    - `w == REPEAT`: `CheckRepeat` (0x459508). The next word must parse as an integer ≥ 0, and the word after that must be `TIMES`. The rest of the line is ignored.
    - `w == IF`: `CheckIf` (0x45958c), see §4.6.
    - `w == WHILE`: `CheckWhile` (0x4597e4). The next word must be `AT_EDGE` or `NOT_AT_EDGE`, and the word after that must be `DO`. The rest of the line is ignored.
-   - `w == PROC`: `CheckProc` (0x45997c). The rest of the line must be exactly one word, the name. The procedure is then **registered** in the procedure table (0x45da24 + 8·(k−1): name, header line = i+1).
+   - `w == PROC`: `CheckProc` (0x45997c). The rest of the line must be exactly one word, the name. The procedure is then **registered** in the procedure table: the 16-bit counter 0x45e22c is incremented (0x4599d3), the name goes to 0x45da24 + 8·(k−1) and the header line index + 1 to the word at 0x45da28 + 8·(k−1) (0x459a38). Duplicates are not checked.
 5. If the line is still invalid: `CheckCall` (0x459a68) accepts it if the whole line equals a registered procedure name.
 
-After the loop, `CheckBalance` (0x459868) counts the lines whose first word is `REPEAT` and the lines that are `END REPEAT`. If the counts differ, the program is flagged unbalanced. **Only REPEAT blocks are balanced.** Missing WHILE or procedure end markers are not detected by the checker. [O]
+**Cross-keyword quirk [O].** `CheckRepeat`, `CheckIf` and `CheckWhile` read their words into the same variable `w` that holds the first word, and the line-valid flag is only ever set, never cleared. A checker that fails can leave a later head keyword in `w`, and that keyword's checker then runs on the rest of the line. Lines accepted this way include:
+- `REPETA 3 DACA E_MARGINE ATUNCI SUS`
+- `REPETA 1 CIT E_MARGINE EXECUTA`
+- `REPETA 1 PROCEDURA X` and `CIT E_MARGINE PROCEDURA X`, which also register `X`.
+
+After the loop, `CheckBalance` (0x459868) scans lines 0..Count−1 (ignoring where the main loop stopped). It counts the lines whose first word is `REPEAT`, and the lines whose first word is `END` and whose remainder is exactly `REPEAT`. Only the counts are compared, not the order. If they differ, the program is flagged unbalanced, which is an **error** (it stops Run), not a warning. **Only REPEAT blocks are balanced.** Missing WHILE or procedure end markers are not detected by the checker. [O]
+
+**Result flag [O].** `SyntaxCheck` reports failure through a byte the caller passes by reference, and only ever writes 1 to it (0x459d05: an invalid line or unbalanced REPEAT), never 0. `RunButtonClick` passes an **uninitialised** stack byte (`[EBP−5]`, 0x459ec9) and refuses to run if it is non-zero (0x459eda). So whether a valid program runs depends on leftover stack contents; when it does not, no message is shown.
 
 ### 4.4 Ordering rules
-- A procedure must be **defined above** any line that calls it, because calls are validated against the procedures registered so far. [O]
+- A procedure must be **defined above** any line that calls it, because calls are validated against the procedures registered so far. [O] Because the table is never reset (§9 #10), a name registered by any earlier Check or Run in the same session also passes.
 - The help text says procedures go before `BEGIN` [O], but the checker only enforces define-before-use. [O]
-- Procedures cannot be nested in each other's text (there is no nesting scan), but a procedure body may call other procedures. [O]
+- Procedures are not meant to be nested in each other's text, but the checker accepts a `PROC` header anywhere, including inside another procedure's body. A procedure body may call other procedures. [O]
 
 ### 4.5 What the original accepts beyond the grammar [O]
 - A lone `END_WHILE`, `END_REPEAT`, `END_PROC`, `AT_EDGE` or `NOT_AT_EDGE` line, anywhere. At run time it does nothing.
 - Procedure definitions anywhere, even after `END`.
 - `BEGIN` and `END` lines counted anywhere in the file. Missing, duplicate or out-of-order markers only produce *warnings* (§8, C2–C6), which do not stop Run.
 - Extra words after `REPEAT n TIMES` and after `WHILE cond DO`.
+- The cross-keyword lines of §4.3, the IF lines of §4.6, the extra number forms of §3.3, and blank lines anywhere (including between procedure definitions).
 
 **[P]** A reimplementation should reject all of these, or warn and continue in a clearly labelled compatibility mode.
 
@@ -310,16 +324,19 @@ After the loop, `CheckBalance` (0x459868) counts the lines whose first word is `
 1. `cond = NextWord`; it must be `AT_EDGE` or `NOT_AT_EDGE`.
 2. `NextWord` must be `THEN`.
 3. `instr1 = NextWord`. It is valid if it is an A-slot keyword or a registered procedure name.
-4. If words remain: `w5 = NextWord`. If words still remain: `instr2 = NextWord`, which is valid if it is an A-slot keyword or a procedure name. If no words remain at that point, the else part counts as valid.
-5. The line is invalid unless both branches are valid. `w5` must equal `ELSE` **only if** more words remain after `instr2`.
+4. If words remain: `w5 = NextWord`, then `instr2 = NextWord`. Only then (0x4596e5) is the rest tested: if no words remain, the else part counts as valid **without checking `instr2`**. Otherwise `instr2` is valid if it is an A-slot keyword or a procedure name.
+5. The line is invalid unless both branches are valid. `w5` must equal `ELSE` **only if** more words remain after `instr2` (0x45977d–0x45979f).
+
+The flag that records "`instr2` is valid" (`[EBP−3]`) is **never initialised**; the code only ever sets it to 1 (0x4596ee, 0x459719, 0x459762). Its starting value is a leftover stack byte, so when `instr2` is invalid *and* words follow it, acceptance is not deterministic. [O]
 
 Observed consequences:
 - `ELSE` is optional.
 - `DACA E_MARGINE ATUNCI SUS ALTFEL` (ELSE with no branch) is accepted.
+- `DACA E_MARGINE ATUNCI SUS ALTFEL FOO` is accepted even when `FOO` is not a procedure: with exactly two words after `instr1`, the else branch is not checked.
 - `DACA E_MARGINE ATUNCI SUS JOS DREAPTA` is accepted: `w5 = JOS` is not checked, and `DREAPTA` runs as the else branch.
-- Words after `ALTFEL x` are ignored.
-- Each branch is **exactly one word**: a move or a procedure name. A branch can also be any other A-slot keyword (such as `INCEPUT`), which is accepted but does nothing at run time.
-- **The whole IF must be on one line.** A line that starts with `ATUNCI` or `ALTFEL` is invalid.
+- In `… ALTFEL x y …`, the word `ALTFEL` is checked and `x` is checked (subject to the uninitialised flag); the words after `x` are ignored.
+- Each branch is **exactly one word**: a move or a procedure name. A branch can also be any other single-word A-slot keyword (such as `INCEPUT`), which is accepted but does nothing at run time.
+- **The whole IF must be on one line.** A line that starts with `ATUNCI` or `ALTFEL` is invalid, unless a procedure with that name is registered.
 - To run several statements in a branch, put them in a procedure and use its name as the branch.
 
 ---
@@ -334,9 +351,9 @@ Observed consequences:
 | Ant row Y | 0x45e228 | 1..10, top → bottom |
 | Facing | 0x45e238 | 1 = down, 2 = left, 3 = up, 4 = right; also selects the sprite (`jos`, `stinga`, `sus`, `dreapta`, str 0x457d40–0x457d68) |
 | Grid | 0x45d9c0 | cell(X,Y) is the byte at 0x45d9c0 + 10·(Y−1) + (X−1); 0 = empty, `'*'` = the ant, any other byte = an object character |
-| Error / stop flag | 0x45e240 | set by failed moves, Stop and missing end markers |
-| Program counter | 0x45e248 | editor line index |
-| Move delay | 0x45d9b8 | milliseconds; 100 by default |
+| Error / stop flag | 0x45e240 | set by failed moves, Stop and running past the last line (REPEAT 0x456266, WHILE 0x456506, CALL 0x4568cb); cleared only at the start of Run (0x459ed3, 0x459f52) and by the arrow buttons, **not** at the end of a run |
+| Program counter | 0x45e248 | 0-based editor line index |
+| Move delay | 0x45d9b8 | 16-bit, milliseconds; 100, set at program entry (0x45b92d) |
 
 Initial state [O] `FormCreate` @0x45a3c0:
 - The ant is at **(1,1)**, the top-left cell, facing **down** (1).
@@ -348,46 +365,52 @@ Cells are 35 px in the original UI (`Image1MouseDown`: cell = (x div 35 + 1, y d
 
 ### 5.2 Moves [O] LEFT 0x454bf4 / RIGHT 0x4545cc / UP 0x45521c / DOWN 0x455844
 
-Described for RIGHT; the other three are symmetric (LEFT: X−1, wall at X<1; UP: Y−1, wall at Y<1; DOWN: Y+1, wall at Y>10).
+Described for RIGHT; DOWN is identical on Y. LEFT (X−1, wall at X<1) and UP (Y−1, wall at Y<1) test the same three failures in a different order (wall, push off the edge, two objects), with the same outcome. Steps 3–5 are independent tests, not an else-chain; the result is the same because step 2 already emptied the ant's cell.
 1. Set facing := right (4) and update the sprite. **Facing changes even if the move then fails.**
 2. cell(X,Y) := 0; X := X+1.
 3. If X > 10 → **error** (wall), X := X−1.
 4. Else, if X < 10 and cell(X,Y) ≠ 0 and cell(X+1,Y) ≠ 0 → **error** (two objects in a row cannot be pushed), X := X−1.
 5. Else, if X = 10 and cell(X,Y) ≠ 0 → **error** (an object cannot be pushed off the grid), X := X−1.
-6. If there is no error and cell(X,Y) ≠ 0 → **push**: cell(X+1,Y) := cell(X,Y), cell(X,Y) := 0. The character is redrawn (Tahoma 19 in the original).
-7. If there is no error: the ant moves to the new cell. When the move comes from a program, a black 2-px rectangle, inset 5 px, is drawn in the cell just left; this is the **trail**. Moves made with the on-screen arrow buttons draw no trail and clear the error flag afterwards.
+6. If there is no error and cell(X,Y) ≠ 0 → **push**: cell(X+1,Y) := cell(X,Y), cell(X,Y) := 0. The character is redrawn with `TextOut` at the destination cell offset (+10, +3) (Tahoma 19 in the original).
+7. If there is no error: the ant moves to the new cell. When the move comes from a program, a black 2-px rectangle, inset 5 px, is drawn in the cell just left; this is the **trail**. Moves made with the on-screen arrow buttons pass "no trail", still change facing and still wait the delay, and clear the error flag afterwards.
 8. Always: wait `delay` ms, then cell(X,Y) := `'*'`.
 
 **Push rule summary:** the ant pushes exactly one object by exactly one cell. The move fails at the edge, when pushing would put the object off the grid, and when two objects are adjacent in the direction of movement.
 
-Quirk [O]/[I]: if the error flag is **already** set when a move starts, step 2 still runs and the position change is kept, but nothing is redrawn. This matters inside procedures (§5.7).
+Quirk [O]: if the error flag is **already** set when a move starts, steps 1–5 still run, so a blocked move is still undone. If the move is not blocked, the new position is kept, but the push, the sprite move and the trail are skipped (0x4547be jumps to 0x454b64). Step 8 still writes `'*'` into the new cell, so **an object there is destroyed** without being pushed, and the sprite stays drawn at the old position. This matters inside procedures (§5.7), after Stop (§5.3), and for the first arrow click after a failed run, because the flag is not cleared when a run ends.
 
 ### 5.3 Main execution loop [O] `RunButtonClick` @0x459ea0
 
-1. Run the syntax check silently. If it reports an error (an invalid line or unbalanced REPEAT), stop.
-2. Save a snapshot of the grid and the program to `!temp.tmp`, in the file format of §7. Then set cell(ant) := `'*'`, PC := beginLine and error := 0.
+1. Run the syntax check (0x459ece). It is **not** silent: only C7 ("syntax OK") is suppressed; C8, C1 and the warnings C2–C6 are shown as usual. If it reports an error (an invalid line or unbalanced REPEAT), stop. Because of the uninitialised result flag (§4.3), a valid program can also be refused without a message.
+2. Save a snapshot of the grid and the program to `!temp.tmp`, in the file format of §7. Then set cell(ant) := `'*'` (0x459f43), PC := beginLine and error := 0. If `!temp.tmp` already exists, Save asks D27 and then skips writing whatever the answer (0x45911b); Save also leaves the save dialog's file name set to `!temp.tmp`.
 3. While `PC ≤ endLine` and there is no error:
    1. Process pending UI events.
    2. `PC := PC + 1`.
    3. `L := Normalize(line[PC])`; `w := NextWord(L)`.
-   4. Dispatch on the first word `w`:
-      - a move keyword → move;
-      - `IF` → IF;
-      - `REPEAT` → REPEAT;
-      - `WHILE` → WHILE;
-      - a registered procedure name (first match) → CALL;
-      - anything else (BEGIN, END, end markers, conditions, PROC headers) → do nothing.
-4. After the loop:
-   - If there was an error, show **C11** (runtime error).
-   - Then, if BEGIN and END both exist, ask **C10** with OK and Cancel buttons. **OK** restores the snapshot (the initial grid, ant and program). **Cancel** deletes the snapshot and erases the trail.
+   4. Dispatch:
+      - `w` against the moves, as an else-chain in the order LEFT, RIGHT, UP, DOWN (0x459fc9), so extra words after a move are ignored;
+      - then, as independent tests: `w == IF` → IF; `w == REPEAT` → REPEAT; `w == WHILE` → WHILE;
+      - then **always** a procedure lookup on `w` (first match) → CALL, even if a keyword already ran;
+      - anything else (BEGIN, END, end markers, conditions, PROC headers) does nothing.
+4. After the loop (0x45a0d7–0x45a1b9):
+   - Process pending UI events.
+   - **No error**, and BEGIN and END both exist: ask **C10** (confirmation, OK and Cancel).
+   - **Error**: show **C11**, then **always** ask C10, with no BEGIN/END test. Then PC := −1.
+   - **OK** loads `!temp.tmp` silently (the initial grid, ant and program); the load deletes `!temp.tmp` and clears the open dialog's file name. OK does not call the trail eraser 0x454150; the trail is only overdrawn by the load blanking each cell, which may leave remnants [I].
+   - **Cancel** deletes `!temp.tmp` and erases the trail (0x454150: white 2-px rectangles, then objects redrawn).
+   - If the syntax check failed, nothing further happens.
+
+If BEGIN is missing (beginLine = −1), execution starts at line 0. [O]
 
 **Off-by-one quirk [O]** (0x45a0bd): the loop condition `PC ≤ endLine` is tested *before* the increment, so **the line immediately after `END` is executed too.**
 
-**Stop [O]** (0x45a904): the Stop button sets the error flag. UI events are processed **only** in the main loop, so Stop has no effect while a REPEAT, WHILE or procedure call is running. It takes effect when control returns to the main loop.
+**Stop [O]** (0x45a904): the Stop button sets the error flag and itself processes UI events. `ProcessMessages` (0x443548) has exactly three callers: the loop head (0x459f65), after the loop (0x45a0de) and the Stop handler (0x45a91e). REPEAT, WHILE, CALL and the moves never process events, so Stop has no effect while they run. The click is delivered at the loop head *after* the loop condition was tested, so **one more main-program line is fetched and executed with the error flag set** (in the quirk mode of §5.2). Stop is then reported as C11, followed by C10.
+
+**Re-entrancy [O]:** the Run and arrow buttons are not disabled during a run. Clicking Run again starts a nested run (whose snapshot hits the existing-`!temp.tmp` path above), and an arrow click clears the error flag.
 
 ### 5.4 IF [O] 0x455e6c
 
-Run time sees the rest of the line as `cond THEN instr1 [w5 instr2]`. The word `w5` is not checked at run time.
+Run time sees the rest of the line as `cond THEN instr1 [w5 instr2]`. Neither `THEN` nor `w5` is checked at run time (0x455ec0–0x455ed5); a leading `IF` word is skipped if present (0x455eac). IF does not check the error flag.
 
 Condition truth (as implemented):
 
@@ -398,61 +421,61 @@ Condition truth (as implemented):
 | left | **X = 10** | X = 1 |
 | right | **X = 1** | X = 10 |
 
-`NOT_AT_EDGE` is the negation. If the condition is true, `instr1` runs; otherwise `instr2` runs, if present. A branch is a move or a procedure call.
+`NOT_AT_EDGE` is the negation; any other condition word counts as true. If the condition is true, `instr1` runs; otherwise `instr2` runs, if present. A branch is compared with UP, DOWN, RIGHT and LEFT (independent tests) and then always looked up in the procedure table (first match).
 
 **Bug [O]** (disassembly 0x455f45–0x455fe4): for horizontal facing, IF tests the **opposite** edge. WHILE (§5.6) uses the correct edges.
 
 ### 5.5 REPEAT [O] 0x456198
 
 1. `n := StrToInt(count word)`. The body starts at PC+1.
-2. Repeat `n` times, stopping early on error:
-   - Scan forward from the body start to the first line equal to `END_REPEAT`. If the scan runs past the last line → error.
-   - Run each body line `L` (the whole normalised line):
-     - `L` is a move keyword → move;
-     - otherwise, by first word: `IF` → IF, `WHILE` → WHILE, procedure name → CALL.
-3. Set PC := the `END_REPEAT` line.
+2. Repeat `n` times, stopping early on error (checked per line at 0x4563ec and per pass at 0x45640b). Each pass reads lines one by one from the body start; there is no separate scan:
+   - `L := Normalize(line)`. If `L == END_REPEAT` (0x4563dc), the pass ends.
+   - Otherwise the line is dispatched: `L` against the moves as a whole line (UP, DOWN, RIGHT, LEFT; 0x456269–0x4562cc); then by first word, `IF` → IF (0x4562df) and `WHILE` → WHILE (0x456304); then a procedure lookup by first word (0x45636b).
+   - The error flag is set only when the line index exceeds `Lines.Count` (0x45625c); the line at index `Count` reads as empty. The line that sets the error is still dispatched, then the loop exits.
+3. Set PC := the `END_REPEAT` line (after an error: the line that failed).
 
 Quirks [O]:
-- **A REPEAT directly inside a REPEAT body is not executed.** The inner `REPETA` line is ignored, and the inner `SFIRSIT REPETA` ends the outer body early. Nesting works through a procedure. (Only the IF and WHILE heads are tested at 0x4562df / 0x456304.)
-- **n = 0:** the body is skipped, but PC is set to the *first body line*, so the main loop continues from the *second* body line. The body therefore runs once, minus its first line.
+- **A REPEAT directly inside a REPEAT body is not executed.** The `REPEAT` head word is never tested in a REPEAT body, so the inner `REPETA` line is ignored, and the inner `SFIRSIT REPETA` ends the outer body early. PC is left on the inner end marker, so the lines between the inner and outer end markers then run **once more** in the enclosing context, and the outer end marker does nothing. Nesting works through a procedure.
+- **n = 0:** the body is skipped, but PC is set to the *first body line* (0x456419), so the caller continues from the *second* body line. The body therefore runs once, minus its first line. This holds in the main program, in a WHILE body and in a procedure body.
+- A WHILE inside a REPEAT works: PC is handed over before the call and read back after it (0x456321/0x456330).
 - No upper limit apart from a 32-bit integer. [I]
 
 ### 5.6 WHILE [O] 0x45644c (disassembly 0x456476–0x4567c8)
 
-- **If the condition is `AT_EDGE`, the body never runs**, whatever the ant's position. Execution scans to the end marker and continues there.
-- With `NOT_AT_EDGE` it behaves as a **do-while**: the body always runs at least once.
-- Body lines are run in sequence:
-  - whole-line move;
-  - first word `IF` → IF;
-  - first word `REPEAT` → REPEAT;
-  - a procedure lookup that compares names against the **rest of the line after the first word**. This is a bug: **a procedure call on its own line inside a WHILE body never runs.**
-  - **A WHILE directly inside a WHILE is not executed.**
-  - When the `END_WHILE` line is reached, control jumps back to the body start.
-- The loop ends at an `END_WHILE` line when the ant faces the edge (down & Y=10, up & Y=1, left & X=1, right & X=10, which are the correct edges). So the condition is tested **only at the end of each pass**.
-- Afterwards, PC := the first `END_WHILE` line after the body start.
+- **If the condition is `AT_EDGE`, the body never runs**, whatever the ant's position (0x4564a2–0x4564b3). In fact any condition word other than `NOT_AT_EDGE` skips the body. Execution scans to the end marker and continues there.
+- With `NOT_AT_EDGE` it behaves as a **do-while**: the body always runs at least once (0x4564b9).
+- Body lines are run in sequence, stopping on error (0x456766):
+  - whole-line move (0x456509–0x45656c);
+  - first word `IF` → IF (0x45657c);
+  - first word `REPEAT` → REPEAT (0x4565a1);
+  - a procedure lookup that compares names against the **rest of the line after the first word** (0x45660a). This is a bug: **a procedure call on its own line inside a WHILE body never runs**, because its rest is empty. Conversely, a procedure named like the second word of a line (for example a procedure `CIT`) is called by that line, including on every `SFIRSIT CIT` line.
+  - The end line is recognised as first word `END` with rest `WHILE` (0x456626–0x45664f). On it, control jumps back to the body start, and the exit test runs.
+  - **A WHILE directly inside a WHILE is not executed:** the `WHILE` head word is never tested. The inner `SFIRSIT CIT` acts as the outer loop's end line.
+- The loop ends at an end line when the ant faces the edge (down & Y=10, up & Y=1, left & X=1, right & X=10, which are the correct edges; 0x45665f–0x45675c). So the condition is tested **only at the end of each pass**.
+- Afterwards (0x456774–0x4567be), PC := the first line equal to `END_WHILE` at index ≥ body start + 1, i.e. the first `END_WHILE` *after the first body line*. The scan has no bounds check: if there is none, it reads empty lines forever (effectively a hang). So an **empty body** (`CIT … EXECUTA` directly followed by `SFIRSIT CIT`) or a **missing `END_WHILE`** hangs, unless a later `END_WHILE` line exists. After an error, PC is also that `END_WHILE` line, not the line that failed. With nested WHILE, PC lands on the inner end marker, so the lines up to the outer marker run once more in the enclosing context.
 - Infinite loops are possible, and Stop cannot interrupt them (§5.3).
 
 ### 5.7 Procedure call [O] 0x4567f4
 
-- Save PC and continue from the procedure's header line.
-- Run the following lines until a line equals `END_PROC`:
+- Save PC (0x456817) and continue from the procedure's header line: the table stores header index + 1, and CALL sets the index to stored − 1 (0x456838–0x456847), i.e. the header itself, which is then skipped by the pre-increment. Lookups take the first match in the table.
+- Run the following lines, each dispatched before the end test, until a whole normalised line equals `END_PROC` (0x456a24):
   - whole-line move;
   - first word `IF` → IF;
   - `REPEAT` → REPEAT;
   - `WHILE` → WHILE;
   - procedure name → CALL. **Recursion is allowed and unlimited**; deep recursion overflows the stack.
-- Restore PC on return.
-- **The body loop never checks the error flag.** After a failed move, the rest of the procedure keeps running, and because of the quirk in §5.2 the position can become inconsistent.
-- If `END_PROC` is missing, the loop never ends. [O]/[I]
+- Restore PC on return (0x456a3b).
+- **The body loop never checks the error flag**, including the error set by running past the last line (0x4568cb). After a failed move, the rest of the procedure keeps running in the quirk mode of §5.2. Inside it, a REPEAT then runs zero passes and leaves PC on its first body line, so the procedure continues from the second body line; a WHILE skips straight to its `END_WHILE` line.
+- If `END_PROC` is missing, execution runs on past the procedure text, through `BEGIN` and the main program, in procedure context, and stops at the next line equal to `END_PROC` (for example, the next procedure's end marker). Only if there is none does it hang, reading empty lines until an integer overflow after about 2³¹ lines; a line that calls the same procedure recurses until the stack overflows. [O]
 
 ### 5.8 Which statements work in which context [O]
 
 | Context | Moves | IF | REPEAT | WHILE | Call | Stops on error / Stop |
 |---|---|---|---|---|---|---|
-| Main program | by first word | yes | yes | yes | by first word | yes (and processes UI events) |
-| REPEAT body | whole line | yes | **no** | yes | by first word | error only |
-| WHILE body | whole line | yes | yes | **no** | **broken** | error only |
-| Procedure body | whole line | yes | yes | yes | yes (recursive) | **no** |
+| Main program | by first word | yes | yes | yes | by first word, always tried | yes (and processes UI events) |
+| REPEAT body | whole line | yes | **no** | yes | by first word, always tried | error only |
+| WHILE body | whole line | yes | yes | **no** | **broken** (by second word) | error only |
+| Procedure body | whole line | yes | yes | yes | by first word, always tried (recursive) | **no** |
 
 ### 5.9 Recommended corrected semantics [P]
 
@@ -464,7 +487,10 @@ For a modern reimplementation that keeps the language but drops the bugs:
 - `REPEAT 0` runs the body zero times.
 - An error anywhere stops the whole program.
 - Stop works everywhere.
-- The procedure table is rebuilt on every check.
+- The procedure table is rebuilt on every check, and procedure names may not equal keywords.
+- Every flag is initialised; the checker validates each line exactly once, against the grammar of §4.2.
+- Missing end markers (REPEAT, WHILE, procedure) are syntax errors.
+- A move never destroys an object.
 - Add a configurable step limit to guard against infinite loops.
 
 Offer a **compatibility mode** that reproduces §5.3–§5.8 exactly, so that legacy example programs behave as they did in class.
@@ -477,10 +503,11 @@ Offer a **compatibility mode** that reproduces §5.3–§5.8 exactly, so that le
 |---|---|---|
 | Grid | 10 × 10 cells | [O] |
 | Objects | one character per cell; any byte except empty, space and `*` | [O] 0x4585bc |
-| Procedures | ≤ 256 registrations per session; see the bug in §9 | [O] |
-| REPEAT count | 0 .. 2³¹−1 | [O]/[I] |
+| Procedures | table `array[1..256]` of 8-byte entries at 0x45da24; ≤ 256 registrations per session, the 257th raises a range-check error (0x4599f1); see §9 #10 | [O] |
+| REPEAT count | 0 .. 2³¹−1 | [O] |
 | Recursion | unbounded (until stack overflow) | [O] |
-| Move delay | 200 − 10·pos ms, slider position 0..20; default 100 ms | [O] 0x456eb0, 0x456f04, 0x45b918 |
+| Line length | lines are read with `EM_GETLINE` into a 4096-byte buffer, so longer lines are truncated | [O] 0x42162c |
+| Move delay | 200 − 10·pos ms, slider position 0..20; default 100 ms. The speed dialog opens at pos = 20 − delay/10 (0x456f10); OK stores 200 − 10·pos (0x456ec5–0x456eee), applied when the dialog closes (0x457020); Cancel keeps the delay but resets the slider to delay/10 (cosmetic bug) | [O] 0x45b928 |
 
 ---
 
@@ -497,12 +524,12 @@ Ant executor file            ← literal, str 0x4593fc
 ...                            columns x = 1..10 (inner loop); c is the raw cell byte,
                                including '*' for the ant itself
 666 666 *                    ← terminator, str 0x459434
-<program text>               ← the editor lines, verbatim, each ending in CRLF
+<program text>               ← the editor text, verbatim (lines separated by CRLF, no CRLF after the last line)
 ```
 
-- **Save:** `.ant` is appended when the 4th-from-last character of the file name is not `.` (0x4593ec). Overwriting an existing file asks a confirmation question (D27, Yes/No).
-- **Load:** the first two lines are skipped without validation. Then X, Y and facing are read. The loader repeatedly reads `a`, `b`, a separator character and the cell character, until `a = 666`, setting cell(a,b) := c. The editor is cleared and every remaining line is added.
-- `!temp.tmp` uses the same format and is the snapshot taken before Run.
+- **Save:** the program is written with `Write(Memo.Text)`, not `WriteLn`, so the file has no final CRLF. If the chosen name exists, a confirmation question is asked (D27, Yes/No) and the file is written only on Yes. Then `.ant` is appended when the 4th-from-last character of the file name is not `.` (0x4593ec). Because the append comes *after* the existence check (and the dialog has no `DefaultExt` or overwrite prompt), saving as `prog` silently overwrites an existing `prog.ant`. A name shorter than 4 characters raises a range-check error.
+- **Load:** all 100 cells are cleared and blanked on screen. The first two lines are skipped without validation. Then X and Y are read and the sprite placed, then facing is read and its sprite loaded. The loader reads the first record before its loop and then repeatedly reads `a`, `b`, a separator character and the cell character, until `a = 666` (whatever `b` and `c` are), setting cell(a,b) := c and drawing non-`'*'` characters centred. The editor is cleared and every remaining line is added. Nothing is validated: out-of-range coordinates, a facing outside 1..4, or a missing terminator (reads at end of file give 0) raise a range-check error. Load does not touch the error flag.
+- `!temp.tmp` uses the same format and is the snapshot taken before Run; loading it after a run also deletes it (0x458fa8).
 
 Example:
 ```
@@ -530,16 +557,18 @@ The message **texts** are lines 20–31 of the localisation file and are unknown
 | C2 | 0x45d914 | BEGIN or END is missing | no (warning) | 0x459d39 |
 | C3 | 0x45d918 | more than one BEGIN | no | 0x459d4b |
 | C4 | 0x45d91c | more than one END | no | 0x459d5d |
-| C5 | 0x45d920 | the program is empty | no | 0x459d83 |
+| C5 | 0x45d920 | the program is empty; unreachable in practice, because an empty program has no BEGIN and C2 fires first | no | 0x459d83 |
 | C6 | 0x45d924 | END comes before BEGIN | no | 0x459d9c |
-| C7 | 0x45d928 | syntax OK (only from the "Analiza sintactica" command) | — | 0x459e2c |
+| C7 | 0x45d928 | no invalid line (only from the "Analiza sintactica" command) | — | 0x459e2c |
 | C8 | 0x45d92c | syntax-error header | yes | 0x459daf |
-| C9 | 0x45d930 | the "line" label, also used in the status bar | — | 0x459dba, 0x45a750, 0x45a808 |
-| C10 | 0x45d934 | after a run: "restore the initial state?" (OK = restore) | — | 0x45a0d7, 0x45a152 |
-| C11 | 0x45d938 | runtime error (refusal) | — | 0x45a152 |
-| C12 | 0x45d93c | exit confirmation | — | 0x45a6f8 |
+| C9 | 0x45d930 | the "line" label, also used in the status bar | — | 0x459dba, 0x45a7c5, 0x45a879 |
+| C10 | 0x45d934 | after a run: "restore the initial state?" (`MessageDlg` confirmation, OK + Cancel; OK = restore) | — | 0x45a109, 0x45a170 |
+| C11 | 0x45d938 | runtime error, also after Stop | — | 0x45a15b |
+| C12 | 0x45d93c | exit confirmation (Yes/No; closes only on Yes) | — | 0x45a6f8 |
 
-Priority [O] (0x459cec–0x459e36): an invalid line comes first, then unbalanced REPEAT, then the warnings C2–C6 in that order, then C7.
+Priority [O] (0x459cec–0x459e36): the messages form an else-if chain: an invalid line (C8), else unbalanced REPEAT (C1), else the warnings C2–C6 in that order. Separately, C7 is shown whenever no line was invalid and the check came from the "Analiza sintactica" command, so it **also follows C1–C6**, including the blocking C1.
+
+The status bar uses two different prefixes: `Memo1KeyDown` (also wired to OnKeyUp in the DFM) uses the hard-coded `Rindul:`, while `Memo1KeyPress` and `Memo1Enter` use C9. [O]
 
 The syntax-error message is built as follows (0x459daf):
 `C8 + CR + C9 + (line number, 1-based) + CR + '"' + original unnormalised line + '"'`.
@@ -572,19 +601,27 @@ Each item says whether a reimplementation should be faithful (**F**) or correct 
 | 2 | IF tests the opposite edge when facing left or right. | 5.4, [O] 0x455f45 | C |
 | 3 | `WHILE AT_EDGE` never runs its body. | 5.6, [O] | C |
 | 4 | `WHILE NOT_AT_EDGE` is a do-while (tested after each pass). | 5.6, [O] | C |
-| 5 | REPEAT directly inside REPEAT is not executed, and the inner end marker ends the outer loop. | 5.5, [O] | C |
-| 6 | WHILE directly inside WHILE is not executed. | 5.6, [O] | C |
-| 7 | A procedure call on its own line inside a WHILE body never runs. | 5.6, [O] | C |
+| 5 | REPEAT directly inside REPEAT is not executed; the inner end marker ends the outer loop, and the lines up to the outer end marker run once more. | 5.5, [O] | C |
+| 6 | WHILE directly inside WHILE is not executed; the inner end marker acts as the outer loop's end, and the lines up to the outer end marker run once more. | 5.6, [O] | C |
+| 7 | A procedure call on its own line inside a WHILE body never runs; a line whose *second* word is a procedure name calls it instead. | 5.6, [O] | C |
 | 8 | `REPEAT 0` runs the body once, minus its first line. | 5.5, [O] | C |
 | 9 | A procedure keeps running after an error. | 5.7, [O] | C |
-| 10 | The procedure table is never reset (counter 0x45e22c is only incremented, at 0x4599d3). Re-checking duplicates entries; lookups take the first match, so edited programs can jump to stale header lines; after 256 registrations in total, Delphi raises a range-check error. | 4.3, [O] | C |
-| 11 | Stop works only between main-program lines. | 5.3, [O] | C |
+| 10 | The procedure table is never reset (counter 0x45e22c is only incremented, at 0x4599d3; nothing else writes it). Every Check **and every Run** re-registers all procedures; lookups take the first match, so edited programs can jump to stale header lines, and names from earlier programs still pass the checker. The 257th registration raises a range-check error; from then on every PROC, call or IF line that is checked raises too, until the program restarts. | 4.3, [O] | C |
+| 11 | Stop works only between main-program lines, and one more line runs (with the error flag set) after it is clicked. | 5.3, [O] | C |
 | 12 | Missing, duplicate or misordered BEGIN/END are only warnings. | 4.5, [O] | C |
 | 13 | WHILE and procedure end markers are not balanced by the checker. | 4.3, [O] | C |
 | 14 | A failed move still changes facing. | 5.2, [O] | F (harmless and visible) |
-| 15 | The IF checker accepts a dangling `ALTFEL` and an unchecked 4th word. | 4.6, [O] | C |
+| 15 | The IF checker accepts a dangling `ALTFEL`, an unchecked 4th word, and an unchecked else branch when it is the last word; its else-valid flag is uninitialised. | 4.6, [O] | C |
 | 16 | A TAB makes a line invalid. | 3.1, [O] | C |
-| 17 | A missing `END_PROC` hangs the program. | 5.7, [O]/[I] | C (report a syntax error) |
+| 17 | A missing `END_PROC` makes the call run on through the following text until some later `END_PROC` line, or hang if there is none. | 5.7, [O] | C (report a syntax error) |
+| 18 | Run passes an uninitialised result flag to the syntax check, so a valid program can be refused silently. | 4.3, [O] 0x459ec9 | C |
+| 19 | The checker's head-keyword tests share one variable, so lines such as `REPETA 3 DACA E_MARGINE ATUNCI SUS` pass. | 4.3, [O] | C |
+| 20 | A procedure named like a keyword runs in addition to it (no shadowing). | 3.3, 5.3, [O] | C (reject keyword names) |
+| 21 | An empty WHILE body, or a missing `END_WHILE`, hangs. | 5.6, [O] | C (report a syntax error) |
+| 22 | A move made while the error flag is already set destroys an object in the target cell. | 5.2, [O] | C |
+| 23 | The error flag is not cleared when a run ends; the next arrow-button move runs in the quirk mode of #22. | 5.1, [O] | C |
+| 24 | After an error, C10 is always asked, even when BEGIN or END is missing; OK does not erase the trail. | 5.3, [O] | C |
+| 25 | Saving as `name` silently overwrites an existing `name.ant`. | 7, [O] | C |
 
 ---
 
@@ -595,17 +632,34 @@ Each item says whether a reimplementation should be faithful (**F**) or correct 
   - Every other keyword button appends `keyword + ' '` to the caret line.
   - `EXECUTA` appends without the trailing space.
   - `Sfirsit...` appends `SFIRSIT `, so the user then picks the block type.
-- **Menu items** [O] (default Romanian captions, slots D1–D30):
-  - Fisier (Nou, Citire…, Salvare…, Iesire);
+- **Menu items** [O] (default Romanian captions from the DFM):
+  - Fisier (Nou, Citire ..., Salvare ..., separator, Iesire);
   - Program (Analiza sintactica, Executare);
   - Configurare (Viteza, Limbajul: Romana, Rusa, Engleza);
-  - Ajutor (Utilizare, Despre).
+  - Ajutor (Despre, Utilizare).
+  - Iesire is wired to `ExitProgramClick`; it and `Iesire1Click` both just call `Close`, so C12 is asked. Toolbar hints are not localised.
+- **D slots** [O] (ReadLanguage 0x457f86–0x45815f, speed dialog `FormActivate` 0x456f55–0x456fcd, help window `FormActivate` 0x45729c–0x4572c3, SaveFileClick 0x459108):
+
+  | Slot | Target | Slot | Target | Slot | Target |
+  |---|---|---|---|---|---|
+  | D1 | Fisier | D11 | Ajutor | D21 | speed dialog OK button |
+  | D2 | Citire | D12 | Despre | D22 | speed dialog `Anulare` button |
+  | D3 | Salvare | D13 | Utilizare | D23 | help window caption |
+  | D4 | Iesire | D14 | GroupBox `Editare:` | D24 | help window Exit button |
+  | D5 | Program | D15 | Label `Caracterul:` | D25 | Nou |
+  | D6 | Analiza sintactica | D16 | CheckBox `Stergere` | D26 | main window caption |
+  | D7 | Executare | D17 | GroupBox `Setare pozitie:` | D27 | **message**: overwrite confirmation (Yes/No) |
+  | D8 | Configurare | D18 | speed dialog `Alegeti viteza furnicii:` | D28 | Romana |
+  | D9 | Viteza | D19 | speed dialog `Viteza Minima` | D29 | Rusa |
+  | D10 | Limbajul | D20 | speed dialog `Viteza Maxima` | D30 | Engleza |
+
+  SpeedButton19 (`Sfirsit...`) gets the caption END + `'...'` at run time (0x4582c4).
 - **Grid editing** [O] 0x4585bc:
-  - Clicking an empty, non-ant cell places the character typed in the one-character "Caracterul:" box. Case is preserved; empty, space and `*` are refused.
-  - With "Stergere" (delete) checked, a click clears the cell. The original does not protect the ant's own cell.
-  - The arrow buttons "Setare pozitie" move the ant with the pushing rules and draw no trail.
-  - The "Rotire" button only cycles the facing (4 → 3 → 2 → 1 → 4).
-- **New** asks `Chiar doriti ?`. Yes clears the grid and the program and puts the ant at (1,1).
+  - Clicking an empty, non-ant cell places the character typed in the one-character "Caracterul:" box (MaxLength 1). Case is preserved; empty, space and `*` are refused. Any mouse button works.
+  - With "Stergere" (delete) checked, the character box and its label are hidden, and a click clears the cell (it may first place the character, but the net effect is a clear). The original does not protect the ant's own cell, so its `'*'` marker can be lost.
+  - The arrow buttons "Setare pozitie" move the ant with the pushing rules, change facing, wait the move delay, draw no trail, and clear the error flag.
+  - The "Rotire" button cycles the facing 4 → 3 → 2 → 1 → 4 (right → up → left → down, counter-clockwise) and redraws the sprite (0x45a214–0x45a22b).
+- **New** asks `Chiar doriti ?` (information icon, Yes/No). Yes clears the grid and calls `FormCreate` again, with the same effects as a language switch (§2.1): the program is cleared, `!temp.tmp` deleted, and the ant put at (1,1) facing down.
 
 ---
 
@@ -617,8 +671,8 @@ Each case uses the Romanian keywords and the initial state from §5.1 (ant at (1
 |---|---|---|---|
 | T1 | `INCEPUT` / `DREAPTA` / `SFIRSIT` | ant at (2,1), trail in (1,1) | same |
 | T2 | object `A` at (3,1); `INCEPUT` / `DREAPTA` / `DREAPTA` / `SFIRSIT` | ant (3,1), `A` at (4,1) | same |
-| T3 | objects at (2,1) and (3,1); `INCEPUT` / `DREAPTA` / `SFIRSIT` | runtime error C11; ant stays at (1,1), facing right | same |
-| T4 | `INCEPUT` / `SUS` / `SFIRSIT` | wall error C11 | same |
+| T3 | objects at (2,1) and (3,1); `INCEPUT` / `DREAPTA` / `SFIRSIT` | runtime error C11, then the C10 question; ant stays at (1,1), facing right | same |
+| T4 | `INCEPUT` / `SUS` / `SFIRSIT` | wall error C11, then C10 | same |
 | T5 | `inceput` / `dreapta` / `sfirsit` (lower case) | same as T1 | same |
 | T6 | a line `\tDREAPTA` (tab) | syntax error C8 on that line | accepted (extension) |
 | T7 | `DACA E_MARGINE` / `ATUNCI SUS` (two lines) | syntax error on line 1 | syntax error |
@@ -629,11 +683,15 @@ Each case uses the Romanian keywords and the initial state from §5.1 (ant at (1
 | T12 | `INCEPUT` / `DREAPTA` / `DACA E_MARGINE ATUNCI SUS ALTFEL JOS` / `SFIRSIT` | facing right at X=2: the faithful test is X=1, false → JOS → ant (2,2) | X=10 is false → JOS → ant (2,2) |
 | T13 | ant at (1,1) facing right; `INCEPUT` / `DACA E_MARGINE ATUNCI JOS ALTFEL SUS` / `SFIRSIT` | faithful test X=1 is **true** → JOS → ant (1,2) | X=10 is false → SUS → wall error |
 | T14 | `PROCEDURA P` / `DREAPTA` / `SFIRSIT PROCEDURA` / `INCEPUT` / `P` / `P` / `SFIRSIT` | ant (3,1) | same |
-| T15 | `INCEPUT` / `P` / `SFIRSIT` / `PROCEDURA P` / … | syntax error: P is not yet defined | syntax error |
+| T15 | fresh session; `INCEPUT` / `P` / `SFIRSIT` / `PROCEDURA P` / … | syntax error: P is not yet defined (but accepted if P was registered by an earlier Check or Run in the session, §9 #10) | syntax error |
 | T16 | `INCEPUT` / `EXECUTA P` / `SFIRSIT` with P defined | syntax error: there is no call keyword | syntax error |
 | T17 | `INCEPUT` / `SFIRSIT` / `DREAPTA` | **DREAPTA runs** (off-by-one) → ant (2,1) | the extra line is a syntax error, or it does not run |
 | T18 | `INCEPUT` / `REPETA 0 ORI` / `DREAPTA` / `JOS` / `SFIRSIT REPETA` / `SFIRSIT` | only JOS runs → ant (1,2) | nothing runs |
 | T19 | `PROCEDURA P` / `DREAPTA` / `SFIRSIT PROCEDURA` / `INCEPUT` / `CIT NU_E_MARGINE EXECUTA` / `P` / `SFIRSIT CIT` / `SFIRSIT` | P never runs inside the WHILE; with the ant facing down at (1,1), the loop body does nothing, so the loop never ends (hang) | ant moves right to (10,1) |
+| T20 | `PROCEDURA SUS` / `DREAPTA` / `SFIRSIT PROCEDURA` / `INCEPUT` / `JOS` / `SUS` / `SFIRSIT` | the `SUS` line moves up *and* calls the procedure → ant (2,1) | the procedure name is rejected |
+| T21 | ant at (1,10) facing down; `INCEPUT` / `CIT NU_E_MARGINE EXECUTA` / `SFIRSIT CIT` / `SFIRSIT` | the exit test succeeds at once, but the final scan starts after the `SFIRSIT CIT` line and never finds another → hang | condition false → nothing runs, program ends |
+| T22 | "Analiza sintactica" on `INCEPUT` / `REPETA 3 DACA E_MARGINE ATUNCI SUS` / `SFIRSIT REPETA` / `SFIRSIT` | no invalid line, REPEAT balanced → C7 (§4.3 cross-keyword quirk) | syntax error on line 2 |
+| T23 | `INCEPUT` / `REPETA 2 ORI` / `DREAPTA` / `REPETA 2 ORI` / `JOS` / `SFIRSIT REPETA` / `DREAPTA` / `SFIRSIT REPETA` / `SFIRSIT` | each outer pass runs DREAPTA, JOS (ant (3,3)); then the lines after the inner end marker run once: DREAPTA → ant (4,3) | ant (5,5) |
 
 ---
 
@@ -657,8 +715,9 @@ Each case uses the Romanian keywords and the initial state from §5.1 (ant at (1
 
 1. The exact contents of `romana.lng`, `rusa.lng` and `engleza.lng`: all keyword spellings, the 12 message texts and D27. Copies may survive on old school computers. [U]
 2. The exact spelling of `SFIRSIT CIT`, `SFIRSIT REPETA` and `SFIRSIT PROCEDURA`. These are strongly inferred from the help text and from the constraints in §2.2. [I]
-3. What the editor returns for a line index past the end (assumed: an empty string). [I]
-4. The exact argument order of the trail rectangle; the visual result is the same either way. [I]
+3. ~~What the editor returns for a line index past the end.~~ Resolved: `TMemoStrings.Get` (0x42162c) sends `EM_GETLINE` with no bounds check; for an index past the end Windows copies 0 characters, so the line is the empty string. [O]/[I]
+4. ~~The exact argument order of the trail rectangle.~~ Resolved: RIGHT, UP and DOWN pass normalised coordinates; LEFT passes X1 = (X+1)·35−5 and X2 = X·35+5, i.e. swapped (0x45510e–0x455187). GDI normalises them, so the result is the same. [O]
+5. What the main window shows after a startup with a missing `.lng` file (§2.1); this needs the program to be run. [I]
 
 ---
 
